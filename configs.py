@@ -11,7 +11,7 @@ class configs:
     # ------------------
     n_j = 3300                     # 任务(工序)数量估计 (Graph Nodes)
     n_m = 5                        # 站位数量 (Stations)
-    n_w = 30                        # 工人数量 (Workers)
+    n_w = 60                        # 工人数量 (Workers)
                                     # 注意：实际任务数由 data_loader 动态加载，此处仅作参考或 Embedding 初始化上界
     
     # ------------------

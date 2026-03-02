@@ -8,6 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from environment import AirLineEnv_Graph
 from ppo_agent import PPOAgent
+from models.hb_gat_pn import HBGATPN
 from train import Memory
 
 def single_episode_worker(worker_args):
@@ -22,6 +23,11 @@ def single_episode_worker(worker_args):
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+            
+        import numpy as np
+        import random
+        np.random.seed(seed)
+        random.seed(seed)
         
         # [2] Init Env
         # Domain Randomization: True by default during training to enforce robust schedules
@@ -32,8 +38,18 @@ def single_episode_worker(worker_args):
         # [3] Inference Device: Enable GPU if available, else fallback
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # [4] Initialize Agent without optimizers (save Memory) and Load weights
-        agent = PPOAgent(configs, env)
+        # [4] Initialize Agent 
+        model = HBGATPN(configs)
+        agent = PPOAgent(
+            model=model,
+            lr=configs.lr,
+            gamma=configs.gamma,
+            k_epochs=configs.k_epochs,
+            eps_clip=configs.eps_clip,
+            device=device,
+            batch_size=configs.batch_size
+        )
+        
         agent.policy.load_state_dict(shared_policy_state_dict)
         agent.policy.to(device)
         agent.policy.eval() # 开启 inference 模式免去 dropout 并在 GAE 选择上也更确定
@@ -52,16 +68,18 @@ def single_episode_worker(worker_args):
             
             # Deadlock Check
             if t_mask.all():
-                reward = -1000.0 
+                # [Critical Fix] 如果遇到死锁，说明上一步的分配是一个致死动作。
+                # 不可以插入全是 True 掩码的 dummy step (会使得 PPO 训练中 Categorical 计算 NaN)，
+                # 应当把死锁的巨大惩罚回绝给上一次记录。
+                if len(memory.rewards) > 0:
+                    memory.rewards[-1] -= 1000.0
+                    memory.is_terminals[-1] = True
+                    ep_reward -= 1000.0
+                else:
+                    # 极其罕见: 初始化图本身便为死锁拓扑
+                    pass 
+                
                 done = True
-                memory.states.append(env.get_state_snapshot())
-                memory.actions.append((0,0,[]))
-                memory.logprobs.append(0.0) # Float
-                memory.rewards.append(reward)
-                memory.is_terminals.append(done)
-                memory.masks.append((task_mask.cpu(), station_mask.cpu(), worker_mask.cpu()))
-                memory.values.append(0.0)
-                ep_reward += reward
                 break
                 
             # inference (no grad required explicitly but let agent handle it)
@@ -97,7 +115,7 @@ def single_episode_worker(worker_args):
                 
         # [6] Performance Stats
         makespan = env.current_time
-        station_loads = [s.workload for s in env.stations]
+        station_loads = env.station_loads
         balance = float(torch.tensor(station_loads, dtype=torch.float).std()) if len(station_loads) > 1 else 0.0
         
         # [7] Pack and send to Surface
